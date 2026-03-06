@@ -1,10 +1,18 @@
 import { apiClient, clearToken, setToken } from "./apiClient";
 
 /**
- * Note: Backend OpenAPI currently only shows a health endpoint.
- * This auth service provides scaffolding that:
- * - Tries backend endpoints if present in future
- * - Falls back to a mock local login for now (admin/user)
+ * Auth integration for Insight Dashboard backend.
+ *
+ * Backend contract (FastAPI):
+ * - POST /auth/login
+ *    Request: { username, password }
+ *    Response: { access_token, token_type, role, username }
+ * - GET /auth/me
+ *    Response: { username, full_name, role }
+ *
+ * This service persists:
+ * - insight.token (JWT access token)
+ * - insight.user  (derived user profile)
  */
 
 const USER_KEY = "insight.user";
@@ -31,15 +39,21 @@ function saveUser(user) {
   }
 }
 
-/**
- * Mock token generator (NOT secure).
- * @param {AuthUser} user
- */
-function makeMockToken(user) {
-  // Do not treat as a real JWT. This is only scaffolding.
-  return btoa(
-    JSON.stringify({ sub: user.id, role: user.role, email: user.email, iat: Date.now() })
-  );
+/** @param {{ username: string, full_name: string, role: string }} profile */
+function mapProfileToAuthUser(profile) {
+  const role = profile.role === "admin" ? "admin" : "user";
+  const username = profile.username || "user";
+  const fullName = profile.full_name || username;
+
+  // We don't have email in backend profile; derive a stable placeholder for UI.
+  const derivedEmail = `${username}@example.com`;
+
+  return /** @type {AuthUser} */ ({
+    id: `user:${username}`,
+    name: fullName,
+    email: derivedEmail,
+    role,
+  });
 }
 
 // PUBLIC_INTERFACE
@@ -49,53 +63,46 @@ export function getStoredSession() {
 }
 
 // PUBLIC_INTERFACE
-export async function login({ email, password, roleHint }) {
+export async function login({ email, password }) {
   /**
-   * Attempts real backend login (future). Currently uses mock auth fallback.
-   * @param {{email: string, password: string, roleHint?: "admin"|"user"}} params
+   * Logs in against backend and persists token + user.
+   *
+   * Contract:
+   *  - Inputs: { email, password } (UI uses email field; backend expects username)
+   *  - Output: AuthUser
+   *  - Errors: throws on 401/validation/network errors (message from backend when present)
+   *  - Side effects: stores insight.token and insight.user in localStorage
+   *
+   * @param {{email: string, password: string}} params
    * @returns {Promise<AuthUser>}
    */
-  // Try a conventional endpoint if backend later provides it.
-  try {
-    const data = await apiClient.post("/auth/login", { email, password });
-    // Expected (future): { access_token, user }
-    if (data?.access_token) setToken(data.access_token);
-    if (data?.user) saveUser(data.user);
-    return data.user;
-  } catch {
-    // Fall back to mock login.
+  const username = (email || "").trim();
+  if (!username) throw new Error("Username is required.");
+  if (!password) throw new Error("Password is required.");
+
+  const tokenResp = await apiClient.post("/auth/login", { username, password });
+  if (!tokenResp?.access_token) {
+    throw new Error("Login failed: missing access_token in response.");
   }
 
-  const normalizedEmail = (email || "").trim().toLowerCase();
-  const isAdmin = roleHint
-    ? roleHint === "admin"
-    : normalizedEmail.includes("admin");
+  setToken(tokenResp.access_token);
 
-  const user = /** @type {AuthUser} */ ({
-    id: isAdmin ? "u_admin_1" : "u_user_1",
-    name: isAdmin ? "Alex Admin" : "Jamie User",
-    email: normalizedEmail || (isAdmin ? "admin@example.com" : "user@example.com"),
-    role: isAdmin ? "admin" : "user",
-  });
+  // Fetch /me to obtain full_name/role.
+  const profile = await apiClient.get("/auth/me");
+  const user = mapProfileToAuthUser(profile);
 
-  // Very light password check to avoid empty login.
-  if (!password || password.length < 3) {
-    throw new Error("Password must be at least 3 characters (mock auth).");
-  }
-
-  setToken(makeMockToken(user));
   saveUser(user);
   return user;
 }
 
 // PUBLIC_INTERFACE
 export async function logout() {
-  /** Clears session locally (and calls backend logout if available). */
-  try {
-    await apiClient.post("/auth/logout", {});
-  } catch {
-    // ignore
-  }
+  /** Clears session locally.
+   * Contract:
+   *  - Inputs: none
+   *  - Output: void
+   *  - Side effects: clears stored token + user
+   */
   clearToken();
   saveUser(null);
 }

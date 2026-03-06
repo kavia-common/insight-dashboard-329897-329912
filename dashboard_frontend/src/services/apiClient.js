@@ -1,10 +1,30 @@
 /**
  * Minimal API client wrapper around fetch.
- * Uses REACT_APP_API_BASE_URL and includes Authorization header when token is present.
+ *
+ * Contract:
+ * - Base URL: REACT_APP_API_BASE_URL (optional). If omitted, uses relative paths (same origin).
+ * - Auth: injects `Authorization: Bearer <token>` if a token exists.
+ * - Errors: throws Error with `.status` set. On 401, emits a global auth event.
+ * - Side effects: reads/writes localStorage for token via setToken/clearToken.
  */
 
-const API_BASE_URL =
-  process.env.REACT_APP_API_BASE_URL?.replace(/\/+$/, "") || "";
+import { emitAuthEvent } from "./authEvents";
+
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL?.replace(/\/+$/, "") || "";
+
+/** @returns {string} */
+function resolveUrl(path, query) {
+  const base = API_BASE_URL ? `${API_BASE_URL}${path}` : path;
+  if (!query || Object.keys(query).length === 0) return base;
+
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(query)) {
+    if (v === undefined || v === null || v === "") continue;
+    usp.set(k, String(v));
+  }
+  const qs = usp.toString();
+  return qs ? `${base}?${qs}` : base;
+}
 
 /** @returns {string | null} */
 function getToken() {
@@ -36,11 +56,11 @@ export function clearToken() {
 /**
  * @template T
  * @param {string} path
- * @param {RequestInit & { json?: any }} [options]
+ * @param {RequestInit & { json?: any, query?: Record<string, any> }} [options]
  * @returns {Promise<T>}
  */
 async function request(path, options = {}) {
-  const url = API_BASE_URL ? `${API_BASE_URL}${path}` : path;
+  const url = resolveUrl(path, options.query);
   const headers = new Headers(options.headers || {});
 
   // Default to JSON requests when a json body is provided.
@@ -70,9 +90,16 @@ async function request(path, options = {}) {
         // ignore
       }
     }
+
     const err = new Error(message);
     // @ts-ignore
     err.status = res.status;
+
+    // Centralized unauthorized handling: emit and let app decide what to do.
+    if (res.status === 401) {
+      emitAuthEvent({ type: "unauthorized", detail: { path, url } });
+    }
+
     throw err;
   }
 
@@ -84,7 +111,7 @@ async function request(path, options = {}) {
 // PUBLIC_INTERFACE
 export const apiClient = {
   /** Generic GET helper */
-  get: (path) => request(path, { method: "GET" }),
+  get: (path, query) => request(path, { method: "GET", query }),
   /** Generic POST helper */
   post: (path, json) => request(path, { method: "POST", json }),
 };

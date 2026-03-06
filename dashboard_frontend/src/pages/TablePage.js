@@ -1,40 +1,16 @@
-import React, { useMemo, useState } from "react";
-import { getMockTableRows } from "../services/mockData";
+import React, { useEffect, useMemo, useState } from "react";
+import { fetchTable } from "../services/dashboardService";
 
 /**
- * @typedef {{ id: string, name: string, status: "healthy"|"warning"|"critical", owner: string, createdAt: string, score: number }} TableRow
+ * Backend table row shape:
+ *  { id: string, data: Record<string, any> }
+ *
+ * This UI expects columns: name, status, owner, createdAt, score.
  */
 
-function compare(a, b) {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
-
-/** @param {TableRow[]} rows */
-function filterRows(rows, query, status) {
-  const q = (query || "").trim().toLowerCase();
-  return rows.filter((r) => {
-    const matchesQuery =
-      !q ||
-      r.name.toLowerCase().includes(q) ||
-      r.owner.toLowerCase().includes(q) ||
-      r.id.toLowerCase().includes(q);
-
-    const matchesStatus = status === "all" ? true : r.status === status;
-    return matchesQuery && matchesStatus;
-  });
-}
-
-/** @param {TableRow[]} rows */
-function sortRows(rows, sortKey, sortDir) {
-  const dir = sortDir === "desc" ? -1 : 1;
-  const sorted = [...rows].sort((a, b) => {
-    const av = a[sortKey];
-    const bv = b[sortKey];
-    return compare(av, bv) * dir;
-  });
-  return sorted;
+function getCell(row, key, fallback = "—") {
+  const v = row?.data?.[key];
+  return v === undefined || v === null || v === "" ? fallback : v;
 }
 
 export default function TablePage() {
@@ -43,18 +19,48 @@ export default function TablePage() {
   const [sortKey, setSortKey] = useState("score");
   const [sortDir, setSortDir] = useState("desc");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(20);
 
-  const allRows = useMemo(() => getMockTableRows(57), []);
+  const [resp, setResp] = useState(null);
+  const [error, setError] = useState(null);
 
-  const filtered = useMemo(() => filterRows(allRows, query, status), [allRows, query, status]);
-  const sorted = useMemo(() => sortRows(filtered, sortKey, sortDir), [filtered, sortKey, sortDir]);
-
-  const total = sorted.length;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const total = resp?.meta?.total_items ?? 0;
+  const totalPages = resp?.meta?.total_pages ?? 1;
   const safePage = Math.min(page, totalPages);
-  const start = (safePage - 1) * pageSize;
-  const pageRows = sorted.slice(start, start + pageSize);
+
+  const rows = useMemo(() => resp?.rows || [], [resp]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function load() {
+      setError(null);
+      try {
+        const searchField = status !== "all" ? "status" : query ? "name" : undefined;
+        const searchContains = status !== "all" ? status : query || undefined;
+
+        const data = await fetchTable({
+          page,
+          pageSize,
+          sortBy: sortKey,
+          sortDir,
+          searchField,
+          searchContains,
+        });
+
+        if (!mounted) return;
+        setResp(data);
+      } catch (e) {
+        if (!mounted) return;
+        setError(e?.message || "Failed to load table.");
+      }
+    }
+
+    load();
+    return () => {
+      mounted = false;
+    };
+  }, [page, pageSize, sortKey, sortDir, query, status]);
 
   function toggleSort(nextKey) {
     setPage(1);
@@ -71,7 +77,7 @@ export default function TablePage() {
       <div className="panelHeader">
         <div>
           <div className="panelTitle">Datasets</div>
-          <div className="panelSub">Filter, sort, and paginate (mock)</div>
+          <div className="panelSub">Filter, sort, and paginate</div>
         </div>
         <span className="badge">{total} rows</span>
       </div>
@@ -81,7 +87,7 @@ export default function TablePage() {
           <input
             className="input"
             style={{ width: 260 }}
-            placeholder="Search by name, owner, id…"
+            placeholder="Search by name…"
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
@@ -129,6 +135,17 @@ export default function TablePage() {
         </div>
       </div>
 
+      {error ? (
+        <div style={{ padding: 12 }}>
+          <span
+            className="badge"
+            style={{ borderColor: "rgba(239,68,68,0.35)", color: "var(--danger-500)" }}
+          >
+            {error}
+          </span>
+        </div>
+      ) : null}
+
       <div className="tableWrap">
         <table className="table">
           <thead>
@@ -161,20 +178,27 @@ export default function TablePage() {
             </tr>
           </thead>
           <tbody>
-            {pageRows.map((r) => (
+            {rows.map((r) => (
               <tr key={r.id}>
-                <td className="td">{r.name}</td>
+                <td className="td">{getCell(r, "name")}</td>
                 <td className="td">
                   <span className="badge">
-                    {r.status === "healthy" ? "🟢" : r.status === "warning" ? "🟡" : "🔴"} {r.status}
+                    {getCell(r, "status") === "healthy"
+                      ? "🟢"
+                      : getCell(r, "status") === "warning"
+                        ? "🟡"
+                        : getCell(r, "status") === "critical"
+                          ? "🔴"
+                          : "•"}{" "}
+                    {getCell(r, "status")}
                   </span>
                 </td>
-                <td className="td">{r.owner}</td>
-                <td className="td">{r.createdAt}</td>
-                <td className="td">{r.score}</td>
+                <td className="td">{getCell(r, "owner")}</td>
+                <td className="td">{getCell(r, "createdAt")}</td>
+                <td className="td">{getCell(r, "score")}</td>
               </tr>
             ))}
-            {pageRows.length === 0 ? (
+            {rows.length === 0 ? (
               <tr>
                 <td className="td" colSpan={5}>
                   <span className="small">No results. Try adjusting filters.</span>
@@ -187,7 +211,7 @@ export default function TablePage() {
 
       <div className="tableFooter">
         <div className="small">
-          Showing <strong>{pageRows.length}</strong> of <strong>{total}</strong>
+          Showing <strong>{rows.length}</strong> of <strong>{total}</strong>
         </div>
         <div className="pagination" aria-label="Pagination">
           <button className="btn btnGhost" onClick={() => setPage(1)} disabled={safePage === 1}>
@@ -201,18 +225,18 @@ export default function TablePage() {
             Prev
           </button>
           <span className="badge">
-            Page <strong>{safePage}</strong> / {totalPages}
+            Page <strong>{safePage}</strong> / {Math.max(1, totalPages)}
           </span>
           <button
             className="btn btnGhost"
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            onClick={() => setPage((p) => Math.min(Math.max(1, totalPages), p + 1))}
             disabled={safePage === totalPages}
           >
             Next
           </button>
           <button
             className="btn btnGhost"
-            onClick={() => setPage(totalPages)}
+            onClick={() => setPage(Math.max(1, totalPages))}
             disabled={safePage === totalPages}
           >
             Last
